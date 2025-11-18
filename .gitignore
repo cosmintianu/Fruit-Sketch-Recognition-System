@@ -1,0 +1,15 @@
+﻿# Visual Studio cache
+.vs/
+*.user
+*.suo
+*.opensdf
+*.sdf
+
+# Build folders
+x64/
+Debug/
+Release/
+*.obj
+*.exe
+*.pdb
+*.ilk
