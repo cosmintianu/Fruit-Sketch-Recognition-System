@@ -34,3 +34,7 @@ Select ISO C++17 Standard (/std:c++17) or ISO C++ Latest (/std:c++latest)​
 Click OK or Apply​
 
 Rebuild your project
+
+## Live prediction
+
+Draw your fruit and press `SPACE` for a prediction.
