@@ -1,0 +1,132 @@
+# Large Dataset Files
+data_npy/
+fruit_images/
+*.npy
+
+# Python Virtual Environment
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Visual Studio
+.vs/
+x64/
+Debug/
+Release/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+*.sdf
+*.opensdf
+*.aps
+*.ncb
+*.ipch
+*.opendb
+*.idb
+*.pdb
+*.ilk
+*.log
+*.tlog
+
+# Visual Studio Code
+.vscode/
+
+# Build Results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww]in32/
+[Aa]rm/
+[Aa]rm64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# OpenCV DLLs (if copied to output)
+*.dll
+
+# Compiled Object files
+*.o
+*.obj
+*.ko
+*.elf
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+fruit_recognizer
+OpenCVApplication
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Images/Videos (keep source code only)
+Images/
+Videos/
+
+# Documentation build
+doc/html/
+doc/latex/
+
+# IDE specific
+*.cbp
+*.layout
+*.depend
+*.workspace
+
+# Test output
+test_results/
+output/
+
+# Large training data
+*.bin
+*.dat

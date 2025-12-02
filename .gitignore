@@ -1,4 +1,14 @@
-﻿# Visual Studio cache
+﻿# Large Dataset Files
+data_npy/
+fruit_images/
+*.npy
+
+# Python Virtual Environment
+.venv/
+venv/
+env/
+
+# Visual Studio cache
 .vs/
 *.user
 *.suo
@@ -13,3 +23,18 @@ Release/
 *.exe
 *.pdb
 *.ilk
+
+# Executables
+*.exe
+*.out
+*.app
+fruit_recognizer
+OpenCVApplication
+
+# Images/Videos (keep source code only)
+Images/
+Videos/
+
+# OpenCV library files (should be installed separately)
+OpenCV/
+
