@@ -1,5 +1,5 @@
-#include "stdafx.h" // Keep if you use precompiled headers, otherwise remove
-#include "common.h" // Keep if you have a common header, otherwise remove
+#include "stdafx.h" // Remove if not using precompiled headers
+#include "common.h" // Remove if not using common headers
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <cmath>
@@ -15,7 +15,7 @@ using namespace std;
 namespace fs = std::filesystem;
 
 // ==========================================
-// 1. DATA STRUCTURES & PREPROCESSING
+// 1. DATA STRUCTURES
 // ==========================================
 
 struct FruitFeatures {
@@ -31,11 +31,49 @@ struct FruitFeatures {
     double avgLineLength;
     double avgLineAngle;
 
-    // NEW: Vector to store manually calculated HOG features
+    // Vector to store manually calculated HOG features
     std::vector<float> hogDescriptors;
 
     int label;
 };
+
+// Helper: Convert FruitFeatures struct into a flat vector of doubles for Naive Bayes
+std::vector<double> flattenFeatures(const FruitFeatures& f) {
+    std::vector<double> flat;
+
+    // Scalars
+    flat.push_back(f.area);
+    flat.push_back(f.perimeter);
+    flat.push_back(f.aspectRatio);
+    flat.push_back(f.solidity);
+    flat.push_back(f.extent);
+    flat.push_back(f.circularity);
+    flat.push_back((double)f.numLines);
+    flat.push_back(f.avgLineLength);
+    flat.push_back(f.avgLineAngle);
+
+    // Arrays
+    for (int i = 0; i < 7; i++) flat.push_back(f.hu[i]);
+    for (int i = 0; i < 8; i++) flat.push_back(f.edgeOrientationHist[i]);
+
+    // HOG Vector
+    for (float val : f.hogDescriptors) {
+        flat.push_back((double)val);
+    }
+
+    return flat;
+}
+
+// Abstract Interface for Classifiers
+class IClassifier {
+public:
+    virtual int predict(const FruitFeatures& testSample) = 0;
+    virtual ~IClassifier() {}
+};
+
+// ==========================================
+// 2. FEATURE EXTRACTION ALGORITHMS
+// ==========================================
 
 Mat preprocessImage(Mat src) {
     Mat gray, denoised, edges;
@@ -53,20 +91,13 @@ Mat preprocessImage(Mat src) {
     return edges;
 }
 
-// ==========================================
-// 2. FEATURE EXTRACTION ALGORITHMS
-// ==========================================
-
-// --- MANUAL HOG IMPLEMENTATION START ---
+// --- MANUAL HOG IMPLEMENTATION ---
 void extractLiteralHOGFeatures(const Mat& src, std::vector<float>& descriptors) {
     descriptors.clear();
 
-    // 1. Pre-processing: Resize to fixed size 32x32
-    // We use a 32x32 image. With cell size 8, we get 4x4 cells.
+    // 1. Pre-processing: Resize to fixed 32x32 (4x4 cells of 8x8)
     Mat img;
     resize(src, img, Size(32, 32));
-
-    // Ensure grayscale and float format for math
     if (img.channels() == 3) cvtColor(img, img, COLOR_BGR2GRAY);
     img.convertTo(img, CV_32F);
 
@@ -78,15 +109,13 @@ void extractLiteralHOGFeatures(const Mat& src, std::vector<float>& descriptors) 
     Mat mag, angle;
     cartToPolar(gx, gy, mag, angle, true); // true = degrees
 
-    // Parameters
     int cellSize = 8;
     int nBins = 9;
-    int cellsX = img.cols / cellSize; // 4
-    int cellsY = img.rows / cellSize; // 4
-    float anglePerBin = 180.0f / nBins; // 20 degrees
+    int cellsX = img.cols / cellSize;
+    int cellsY = img.rows / cellSize;
+    float anglePerBin = 180.0f / nBins;
 
     // 3. Compute Cell Histograms (Trilinear Interpolation)
-    // Structure: [cellY][cellX][bin]
     vector<vector<vector<float>>> cellHistograms(
         cellsY, vector<vector<float>>(cellsX, vector<float>(nBins, 0.0f))
     );
@@ -96,14 +125,13 @@ void extractLiteralHOGFeatures(const Mat& src, std::vector<float>& descriptors) 
             float m = mag.at<float>(y, x);
             float a = angle.at<float>(y, x);
 
-            // Normalize angle to 0-180
             if (a >= 180.0f) a -= 180.0f;
             if (a < 0.0f) a += 180.0f;
 
             int cx = x / cellSize;
             int cy = y / cellSize;
 
-            // Soft Binning (Linear Interpolation between bins)
+            // Soft Binning
             float binPos = a / anglePerBin;
             int bin1 = (int)floor(binPos) % nBins;
             int bin2 = (bin1 + 1) % nBins;
@@ -117,15 +145,11 @@ void extractLiteralHOGFeatures(const Mat& src, std::vector<float>& descriptors) 
     }
 
     // 4. Block Normalization (L2 Norm) & Flattening
-    // We use 2x2 cell blocks with stride 1.
-    // For 4x4 cells, we have 3x3 blocks.
     for (int by = 0; by < cellsY - 1; by++) {
         for (int bx = 0; bx < cellsX - 1; bx++) {
-
             vector<float> blockVec;
             float sumSq = 0.0f;
 
-            // Iterate over 2x2 cells in this block
             for (int cy = by; cy < by + 2; cy++) {
                 for (int cx = bx; cx < bx + 2; cx++) {
                     for (int b = 0; b < nBins; b++) {
@@ -136,28 +160,23 @@ void extractLiteralHOGFeatures(const Mat& src, std::vector<float>& descriptors) 
                 }
             }
 
-            // Normalize
-            float scale = 1.0f / sqrt(sumSq + 1e-5f); // Epsilon for stability
+            float scale = 1.0f / sqrt(sumSq + 1e-5f);
             for (float& val : blockVec) {
                 descriptors.push_back(val * scale);
             }
         }
     }
 }
-// --- MANUAL HOG IMPLEMENTATION END ---
 
 void extractContourFeatures(const vector<Point>& contour, FruitFeatures& features) {
     features.area = contourArea(contour);
     features.perimeter = arcLength(contour, true);
-
     Rect boundingBox = boundingRect(contour);
     features.aspectRatio = (double)boundingBox.width / boundingBox.height;
-
     vector<Point> hull;
     convexHull(contour, hull);
     double hullArea = contourArea(hull);
     features.solidity = features.area / hullArea;
-
     features.extent = features.area / (boundingBox.width * boundingBox.height);
     features.circularity = (4 * CV_PI * features.area) / (features.perimeter * features.perimeter);
 }
@@ -165,67 +184,50 @@ void extractContourFeatures(const vector<Point>& contour, FruitFeatures& feature
 void extractHuMoments(const vector<Point>& contour, FruitFeatures& features) {
     Moments m = moments(contour);
     HuMoments(m, features.hu);
-
     for (int i = 0; i < 7; i++) {
         features.hu[i] = -1 * copysign(1.0, features.hu[i]) * log10(abs(features.hu[i]) + 1e-10);
     }
 }
 
 void extractEdgeOrientationHistogram(Mat edges, FruitFeatures& features) {
-    for (int i = 0; i < 8; i++) {
-        features.edgeOrientationHist[i] = 0;
-    }
-
+    for (int i = 0; i < 8; i++) features.edgeOrientationHist[i] = 0;
     Mat gradX, gradY;
     Sobel(edges, gradX, CV_32F, 1, 0, 3);
     Sobel(edges, gradY, CV_32F, 0, 1, 3);
-
     int totalEdgePixels = 0;
-
     for (int i = 1; i < edges.rows - 1; i++) {
         for (int j = 1; j < edges.cols - 1; j++) {
             if (edges.at<uchar>(i, j) > 0) {
                 float gx = gradX.at<float>(i, j);
                 float gy = gradY.at<float>(i, j);
                 float angle = atan2(gy, gx) * 180.0 / CV_PI;
-
                 if (angle < 0) angle += 180;
-
                 int bin = (int)(angle / 22.5);
                 if (bin >= 8) bin = 7;
-
                 features.edgeOrientationHist[bin]++;
                 totalEdgePixels++;
             }
         }
     }
-
     if (totalEdgePixels > 0) {
-        for (int i = 0; i < 8; i++) {
-            features.edgeOrientationHist[i] /= totalEdgePixels;
-        }
+        for (int i = 0; i < 8; i++) features.edgeOrientationHist[i] /= totalEdgePixels;
     }
 }
 
 void extractHoughFeatures(Mat edges, FruitFeatures& features) {
     vector<Vec4i> lines;
     HoughLinesP(edges, lines, 1, CV_PI / 180, 50, 30, 10);
-
     features.numLines = lines.size();
-
     if (lines.size() > 0) {
         double totalLength = 0;
         double totalAngle = 0;
-
         for (size_t i = 0; i < lines.size(); i++) {
             Vec4i l = lines[i];
             double length = sqrt(pow(l[2] - l[0], 2) + pow(l[3] - l[1], 2));
             double angle = atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
-
             totalLength += length;
             totalAngle += abs(angle);
         }
-
         features.avgLineLength = totalLength / lines.size();
         features.avgLineAngle = totalAngle / lines.size();
     }
@@ -266,57 +268,41 @@ FruitFeatures extractFeatures(Mat img, int label = -1) {
     extractHuMoments(mainContour, features);
     extractEdgeOrientationHistogram(edges, features);
     extractHoughFeatures(edges, features);
-
-    // NEW: Extract Manual HOG Features from original image
     extractLiteralHOGFeatures(img, features.hogDescriptors);
 
     return features;
 }
 
 // ==========================================
-// 3. CLASSIFICATION SYSTEM
+// 3. CLASSIFIERS
 // ==========================================
 
-class KNNClassifier {
+class KNNClassifier : public IClassifier {
 private:
     vector<FruitFeatures> trainingData;
     int K;
 
     double computeDistance(const FruitFeatures& f1, const FruitFeatures& f2) {
         double dist = 0;
-
         dist += pow((f1.area - f2.area) / 10000.0, 2);
         dist += pow((f1.perimeter - f2.perimeter) / 1000.0, 2);
         dist += pow(f1.aspectRatio - f2.aspectRatio, 2);
         dist += pow(f1.solidity - f2.solidity, 2);
         dist += pow(f1.extent - f2.extent, 2);
         dist += pow(f1.circularity - f2.circularity, 2);
-
-        for (int i = 0; i < 7; i++) {
-            dist += 2.0 * pow(f1.hu[i] - f2.hu[i], 2);
-        }
-
-        for (int i = 0; i < 8; i++) {
-            dist += 1.5 * pow(f1.edgeOrientationHist[i] - f2.edgeOrientationHist[i], 2);
-        }
-
+        for (int i = 0; i < 7; i++) dist += 2.0 * pow(f1.hu[i] - f2.hu[i], 2);
+        for (int i = 0; i < 8; i++) dist += 1.5 * pow(f1.edgeOrientationHist[i] - f2.edgeOrientationHist[i], 2);
         dist += 0.5 * pow((f1.numLines - f2.numLines) / 10.0, 2);
         dist += 0.5 * pow((f1.avgLineLength - f2.avgLineLength) / 100.0, 2);
         dist += 0.5 * pow((f1.avgLineAngle - f2.avgLineAngle) / 90.0, 2);
 
-        // NEW: Add HOG Distance
-        // Ensure both have valid HOG vectors of the same size
         if (!f1.hogDescriptors.empty() && f1.hogDescriptors.size() == f2.hogDescriptors.size()) {
             double hogDist = 0;
             for (size_t i = 0; i < f1.hogDescriptors.size(); i++) {
                 hogDist += pow(f1.hogDescriptors[i] - f2.hogDescriptors[i], 2);
             }
-            // Weighting HOG: 
-            // HOG vector is long (~300 features), so raw Euclidean distance can be large.
-            // We scale it down to balance with other shape features.
             dist += 0.5 * hogDist;
         }
-
         return sqrt(dist);
     }
 
@@ -327,10 +313,8 @@ public:
         trainingData = trainSet;
     }
 
-    int predict(const FruitFeatures& testSample) {
-        if (trainingData.empty()) {
-            return -1;
-        }
+    int predict(const FruitFeatures& testSample) override {
+        if (trainingData.empty()) return -1;
 
         vector<pair<double, int>> distances;
         for (size_t i = 0; i < trainingData.size(); i++) {
@@ -343,100 +327,155 @@ public:
         map<int, int> votes;
         int maxVotes = 0;
         int predictedLabel = -1;
-
         int kNeighbors = min(K, (int)distances.size());
+
         for (int i = 0; i < kNeighbors; i++) {
             int label = distances[i].second;
             votes[label]++;
-
             if (votes[label] > maxVotes) {
                 maxVotes = votes[label];
                 predictedLabel = label;
             }
         }
-
         return predictedLabel;
     }
 
     double evaluate(const vector<FruitFeatures>& testSet) {
-        if (testSet.empty()) {
-            return 0.0;
+        if (testSet.empty()) return 0.0;
+        int correct = 0;
+        for (const auto& item : testSet) {
+            if (predict(item) == item.label) correct++;
+        }
+        return (double)correct / testSet.size();
+    }
+};
+
+class NaiveBayesClassifier : public IClassifier {
+private:
+    struct ClassStats {
+        double prior;                  // Log Prior
+        std::vector<double> means;     // Mean for each feature
+        std::vector<double> variances; // Variance for each feature
+    };
+    std::map<int, ClassStats> model;
+    const double EPSILON = 1e-9;
+
+public:
+    void train(const vector<FruitFeatures>& trainSet) {
+        if (trainSet.empty()) return;
+        model.clear();
+
+        map<int, vector<vector<double>>> dataByClass;
+        for (const auto& f : trainSet) {
+            dataByClass[f.label].push_back(flattenFeatures(f));
         }
 
-        int correct = 0;
-        for (size_t i = 0; i < testSet.size(); i++) {
-            int predicted = predict(testSet[i]);
-            if (predicted == testSet[i].label) {
-                correct++;
+        int totalSamples = trainSet.size();
+
+        for (const auto& [label, samples] : dataByClass) {
+            if (samples.empty()) continue;
+
+            int numFeatures = samples[0].size();
+            int numSamples = samples.size();
+            ClassStats stats;
+            stats.prior = log((double)numSamples / totalSamples);
+            stats.means.resize(numFeatures, 0.0);
+            stats.variances.resize(numFeatures, 0.0);
+
+            for (const auto& s : samples) {
+                for (int i = 0; i < numFeatures; i++) stats.means[i] += s[i];
+            }
+            for (int i = 0; i < numFeatures; i++) stats.means[i] /= numSamples;
+
+            for (const auto& s : samples) {
+                for (int i = 0; i < numFeatures; i++) {
+                    double diff = s[i] - stats.means[i];
+                    stats.variances[i] += diff * diff;
+                }
+            }
+            for (int i = 0; i < numFeatures; i++) {
+                stats.variances[i] = (stats.variances[i] / numSamples) + EPSILON;
+            }
+            model[label] = stats;
+        }
+    }
+
+    int predict(const FruitFeatures& features) override {
+        if (model.empty()) return -1;
+        vector<double> sample = flattenFeatures(features);
+        double maxLogProb = -1e9;
+        int bestClass = -1;
+
+        for (const auto& [label, stats] : model) {
+            if (sample.size() != stats.means.size()) continue;
+            double logProb = stats.prior;
+
+            for (size_t i = 0; i < sample.size(); i++) {
+                double mean = stats.means[i];
+                double var = stats.variances[i];
+                double x = sample[i];
+                double logSigma = -0.5 * log(2.0 * CV_PI * var);
+                double exponent = -pow(x - mean, 2) / (2.0 * var);
+                logProb += (logSigma + exponent);
+            }
+
+            if (logProb > maxLogProb || bestClass == -1) {
+                maxLogProb = logProb;
+                bestClass = label;
             }
         }
+        return bestClass;
+    }
 
+    double evaluate(const vector<FruitFeatures>& testSet) {
+        if (testSet.empty()) return 0.0;
+        int correct = 0;
+        for (const auto& item : testSet) {
+            if (predict(item) == item.label) correct++;
+        }
         return (double)correct / testSet.size();
     }
 };
 
 // ==========================================
-// 4. DATA LOADING & MAIN UTILS
+// 4. DATA LOADING
 // ==========================================
 
 map<string, int> fruitLabelMap = {
-    {"apple", 0},
-    {"banana", 1},
-    {"blueberry", 2},
-    {"grapes", 3},
-    {"pineapple", 4},
-    {"strawberry", 5},
-    {"watermelon", 6}
+    {"apple", 0}, {"banana", 1}, {"blueberry", 2}, {"grapes", 3},
+    {"pineapple", 4}, {"strawberry", 5}, {"watermelon", 6}
 };
 
 map<int, string> labelToFruitMap = {
-    {0, "apple"},
-    {1, "banana"},
-    {2, "blueberry"},
-    {3, "grapes"},
-    {4, "pineapple"},
-    {5, "strawberry"},
-    {6, "watermelon"}
+    {0, "apple"}, {1, "banana"}, {2, "blueberry"}, {3, "grapes"},
+    {4, "pineapple"}, {5, "strawberry"}, {6, "watermelon"}
 };
 
 vector<FruitFeatures> loadImagesFromDirectory(const string& baseDir, int maxImagesPerClass = 1000) {
     vector<FruitFeatures> features;
-
     cout << "Loading images from: " << baseDir << endl;
 
     for (const auto& [fruitName, label] : fruitLabelMap) {
         string fruitDir = baseDir + "/" + fruitName;
-
         if (!fs::exists(fruitDir)) {
             cout << "Warning: Directory not found - " << fruitDir << endl;
             continue;
         }
-
         cout << "Loading " << fruitName << " (label " << label << ")..." << endl;
-
         int loadedCount = 0;
         for (const auto& entry : fs::directory_iterator(fruitDir)) {
             if (loadedCount >= maxImagesPerClass) break;
-
             if (entry.path().extension() == ".png" || entry.path().extension() == ".jpg") {
                 Mat img = imread(entry.path().string(), IMREAD_GRAYSCALE);
-
                 if (!img.empty()) {
                     FruitFeatures feat = extractFeatures(img, label);
                     features.push_back(feat);
                     loadedCount++;
-
-                    if (loadedCount % 100 == 0) {
-                        cout << "  Loaded " << loadedCount << " images..." << endl;
-                    }
                 }
             }
         }
-
-        cout << "  Total loaded for " << fruitName << ": " << loadedCount << endl;
+        cout << "  Total: " << loadedCount << endl;
     }
-
-    cout << "Total features extracted: " << features.size() << endl;
     return features;
 }
 
@@ -446,33 +485,23 @@ void splitTrainTest(const vector<FruitFeatures>& allData,
     double trainRatio = 0.8) {
 
     map<int, vector<FruitFeatures>> dataByLabel;
-    for (const auto& feat : allData) {
-        dataByLabel[feat.label].push_back(feat);
-    }
+    for (const auto& feat : allData) dataByLabel[feat.label].push_back(feat);
 
     random_device rd;
     mt19937 g(rd());
 
     for (auto& [label, data] : dataByLabel) {
         shuffle(data.begin(), data.end(), g);
-
         int trainSize = (int)(data.size() * trainRatio);
-
-        for (int i = 0; i < trainSize; i++) {
-            trainSet.push_back(data[i]);
-        }
-
-        for (int i = trainSize; i < data.size(); i++) {
-            testSet.push_back(data[i]);
-        }
+        for (int i = 0; i < trainSize; i++) trainSet.push_back(data[i]);
+        for (int i = trainSize; i < data.size(); i++) testSet.push_back(data[i]);
     }
-
     shuffle(trainSet.begin(), trainSet.end(), g);
     shuffle(testSet.begin(), testSet.end(), g);
 }
 
 // ==========================================
-// 5. INTERACTIVE DRAWING APP
+// 5. INTERACTIVE APP
 // ==========================================
 
 class DrawingApp {
@@ -480,19 +509,18 @@ private:
     Mat canvas;
     Point prevPoint;
     bool isDrawing;
-    KNNClassifier* classifier;
+    IClassifier* classifier; // Polymorphic pointer
 
 public:
-    DrawingApp(int width, int height, KNNClassifier* knn) : classifier(knn) {
+    DrawingApp(int width, int height, IClassifier* model) : classifier(model) {
         canvas = Mat::zeros(height, width, CV_8UC3);
-        canvas.setTo(Scalar(255, 255, 255)); // White background
+        canvas.setTo(Scalar(255, 255, 255));
         isDrawing = false;
         prevPoint = Point(-1, -1);
     }
 
     static void onMouse(int event, int x, int y, int flags, void* userdata) {
         DrawingApp* app = (DrawingApp*)userdata;
-
         if (event == EVENT_LBUTTONDOWN) {
             app->isDrawing = true;
             app->prevPoint = Point(x, y);
@@ -514,156 +542,95 @@ public:
         setMouseCallback(windowName, onMouse, this);
 
         cout << "\n===== INTERACTIVE DRAWING MODE =====" << endl;
-        cout << "Instructions:" << endl;
-        cout << "  - Draw a fruit sketch with your mouse" << endl;
-        cout << "  - Press SPACE to predict what you drew" << endl;
-        cout << "  - Press 'C' to clear and draw again" << endl;
-        cout << "  - Press 'S' to save your drawing" << endl;
-        cout << "  - Press ESC to exit" << endl;
-        cout << "====================================\n" << endl;
-
+        cout << "  SPACE: Predict | C: Clear | S: Save | ESC: Exit" << endl;
         imshow(windowName, canvas);
 
         while (true) {
             int key = waitKey(1);
-
-            if (key == 27) { // ESC
-                break;
-            }
-            else if (key == 32) { // SPACE - Predict
-                predict();
-            }
-            else if (key == 'c' || key == 'C') { // Clear
-                clear();
-            }
-            else if (key == 's' || key == 'S') { // Save
-                saveDrawing();
-            }
+            if (key == 27) break;
+            else if (key == 32) predict();
+            else if (key == 'c' || key == 'C') clear();
+            else if (key == 's' || key == 'S') saveDrawing();
         }
-
         destroyWindow(windowName);
     }
 
 private:
     void predict() {
-        // Convert to grayscale
         Mat gray;
         cvtColor(canvas, gray, COLOR_BGR2GRAY);
-
-        // Invert (white background to black, black drawing to white)
         Mat inverted;
         bitwise_not(gray, inverted);
-
-        // Resize to standard size (similar to Quick Draw images)
         Mat resized;
         resize(inverted, resized, Size(28, 28), 0, 0, INTER_AREA);
 
-        // Extract features
         FruitFeatures features = extractFeatures(resized);
-
-        // Predict
         int predictedLabel = classifier->predict(features);
 
-        if (predictedLabel >= 0 && predictedLabel < labelToFruitMap.size()) {
+        if (predictedLabel >= 0) {
             string fruitName = labelToFruitMap[predictedLabel];
-
-            cout << "\n*** PREDICTION: " << fruitName << " ***" << endl;
-
-            // Show prediction on canvas
+            cout << "*** PREDICTION: " << fruitName << " ***" << endl;
             Mat displayCanvas = canvas.clone();
             putText(displayCanvas, "Prediction: " + fruitName,
-                Point(10, 30), FONT_HERSHEY_SIMPLEX, 1.0,
-                Scalar(0, 255, 0), 2);
+                Point(10, 30), FONT_HERSHEY_SIMPLEX, 1.0, Scalar(0, 255, 0), 2);
             imshow("Draw Your Fruit", displayCanvas);
-
-            // Show preprocessed version in separate window
-            Mat edges = preprocessImage(resized);
-            Mat edgesDisplay;
-            resize(edges, edgesDisplay, Size(280, 280), 0, 0, INTER_NEAREST);
-            imshow("Preprocessed (What AI Sees)", edgesDisplay);
-        }
-        else {
-            cout << "Could not predict. Try drawing clearer!" << endl;
         }
     }
 
     void clear() {
         canvas.setTo(Scalar(255, 255, 255));
         imshow("Draw Your Fruit", canvas);
-        destroyWindow("Preprocessed (What AI Sees)");
-        cout << "Canvas cleared. Draw again!" << endl;
+        cout << "Cleared." << endl;
     }
 
     void saveDrawing() {
         static int saveCount = 0;
         string filename = "my_drawing_" + to_string(saveCount++) + ".png";
         imwrite(filename, canvas);
-        cout << "Drawing saved as: " << filename << endl;
+        cout << "Saved: " << filename << endl;
     }
 };
 
 // ==========================================
-// 6. MAIN EXECUTION
+// 6. MAIN
 // ==========================================
 
 int main() {
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_WARNING);
 
-    cout << "===== Fruit Sketch Recognition System (w/ Manual HOG) =====" << endl;
+    cout << "===== Fruit Sketch Recognition System =====" << endl;
 
-    // Load all images (limit to 1000 per class for faster testing)
     vector<FruitFeatures> allFeatures = loadImagesFromDirectory("fruit_images", 1000);
-
     if (allFeatures.empty()) {
-        cout << "Error: No images loaded. Make sure fruit_images directory exists." << endl;
+        cout << "Error: No images loaded." << endl;
         return -1;
     }
 
-    // Split into train (80%) and test (20%)
     vector<FruitFeatures> trainFeatures, testFeatures;
     splitTrainTest(allFeatures, trainFeatures, testFeatures, 0.8);
+    cout << "Train: " << trainFeatures.size() << " | Test: " << testFeatures.size() << endl;
 
-    cout << "\nDataset split:" << endl;
-    cout << "  Training samples: " << trainFeatures.size() << endl;
-    cout << "  Testing samples: " << testFeatures.size() << endl;
-
-    // Train KNN classifier with K=5
-    cout << "\nTraining KNN classifier (K=5)..." << endl;
+    // Train KNN
+    cout << "\nTraining KNN (K=5)..." << endl;
     KNNClassifier knn(5);
     knn.train(trainFeatures);
+    cout << "KNN Accuracy: " << (knn.evaluate(testFeatures) * 100) << "%" << endl;
 
-    // Evaluate on test set
-    cout << "\nEvaluating on test set..." << endl;
-    double accuracy = knn.evaluate(testFeatures);
+    // Train Naive Bayes
+    cout << "\nTraining Naive Bayes..." << endl;
+    NaiveBayesClassifier nb;
+    nb.train(trainFeatures);
+    cout << "Naive Bayes Accuracy: " << (nb.evaluate(testFeatures) * 100) << "%" << endl;
 
-    cout << "\n===== RESULTS =====" << endl;
-    cout << "Classification Accuracy: " << (accuracy * 100) << "%" << endl;
+    // Choose Model
+    cout << "\nWhich model for drawing? (k=KNN, n=Naive Bayes): ";
+    char choice;
+    cin >> choice;
 
-    // Detailed per-class accuracy
-    map<int, int> correct, total;
-    for (const auto& feat : testFeatures) {
-        int predicted = knn.predict(feat);
-        total[feat.label]++;
-        if (predicted == feat.label) {
-            correct[feat.label]++;
-        }
-    }
+    IClassifier* selectedModel = (choice == 'n' || choice == 'N') ? (IClassifier*)&nb : (IClassifier*)&knn;
 
-    cout << "\nPer-class accuracy:" << endl;
-    for (const auto& [label, name] : labelToFruitMap) {
-        if (total[label] > 0) {
-            double classAcc = (double)correct[label] / total[label] * 100;
-            cout << "  " << name << ": " << classAcc << "% ("
-                << correct[label] << "/" << total[label] << ")" << endl;
-        }
-    }
-
-    // Launch interactive drawing interface
-    cout << "\n===== Starting Interactive Mode =====" << endl;
-    DrawingApp app(800, 600, &knn);
+    DrawingApp app(800, 600, selectedModel);
     app.run();
-
-    cout << "\nThank you for using Fruit Sketch Recognition!" << endl;
 
     return 0;
 }
