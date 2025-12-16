@@ -1,5 +1,5 @@
-#include "stdafx.h"
-#include "common.h"
+#include "stdafx.h" // Keep if you use precompiled headers, otherwise remove
+#include "common.h" // Keep if you have a common header, otherwise remove
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <cmath>
@@ -13,6 +13,29 @@
 using namespace cv;
 using namespace std;
 namespace fs = std::filesystem;
+
+// ==========================================
+// 1. DATA STRUCTURES & PREPROCESSING
+// ==========================================
+
+struct FruitFeatures {
+    double area;
+    double perimeter;
+    double aspectRatio;
+    double solidity;
+    double extent;
+    double circularity;
+    double hu[7];
+    double edgeOrientationHist[8];
+    int numLines;
+    double avgLineLength;
+    double avgLineAngle;
+
+    // NEW: Vector to store manually calculated HOG features
+    std::vector<float> hogDescriptors;
+
+    int label;
+};
 
 Mat preprocessImage(Mat src) {
     Mat gray, denoised, edges;
@@ -30,20 +53,98 @@ Mat preprocessImage(Mat src) {
     return edges;
 }
 
-struct FruitFeatures {
-    double area;
-    double perimeter;
-    double aspectRatio;
-    double solidity;
-    double extent;
-    double circularity;
-    double hu[7];
-    double edgeOrientationHist[8];
-    int numLines;
-    double avgLineLength;
-    double avgLineAngle;
-    int label;
-};
+// ==========================================
+// 2. FEATURE EXTRACTION ALGORITHMS
+// ==========================================
+
+// --- MANUAL HOG IMPLEMENTATION START ---
+void extractLiteralHOGFeatures(const Mat& src, std::vector<float>& descriptors) {
+    descriptors.clear();
+
+    // 1. Pre-processing: Resize to fixed size 32x32
+    // We use a 32x32 image. With cell size 8, we get 4x4 cells.
+    Mat img;
+    resize(src, img, Size(32, 32));
+
+    // Ensure grayscale and float format for math
+    if (img.channels() == 3) cvtColor(img, img, COLOR_BGR2GRAY);
+    img.convertTo(img, CV_32F);
+
+    // 2. Calculate Gradients
+    Mat gx, gy;
+    Sobel(img, gx, CV_32F, 1, 0, 1);
+    Sobel(img, gy, CV_32F, 0, 1, 1);
+
+    Mat mag, angle;
+    cartToPolar(gx, gy, mag, angle, true); // true = degrees
+
+    // Parameters
+    int cellSize = 8;
+    int nBins = 9;
+    int cellsX = img.cols / cellSize; // 4
+    int cellsY = img.rows / cellSize; // 4
+    float anglePerBin = 180.0f / nBins; // 20 degrees
+
+    // 3. Compute Cell Histograms (Trilinear Interpolation)
+    // Structure: [cellY][cellX][bin]
+    vector<vector<vector<float>>> cellHistograms(
+        cellsY, vector<vector<float>>(cellsX, vector<float>(nBins, 0.0f))
+    );
+
+    for (int y = 0; y < img.rows; y++) {
+        for (int x = 0; x < img.cols; x++) {
+            float m = mag.at<float>(y, x);
+            float a = angle.at<float>(y, x);
+
+            // Normalize angle to 0-180
+            if (a >= 180.0f) a -= 180.0f;
+            if (a < 0.0f) a += 180.0f;
+
+            int cx = x / cellSize;
+            int cy = y / cellSize;
+
+            // Soft Binning (Linear Interpolation between bins)
+            float binPos = a / anglePerBin;
+            int bin1 = (int)floor(binPos) % nBins;
+            int bin2 = (bin1 + 1) % nBins;
+
+            float weight2 = binPos - floor(binPos);
+            float weight1 = 1.0f - weight2;
+
+            cellHistograms[cy][cx][bin1] += m * weight1;
+            cellHistograms[cy][cx][bin2] += m * weight2;
+        }
+    }
+
+    // 4. Block Normalization (L2 Norm) & Flattening
+    // We use 2x2 cell blocks with stride 1.
+    // For 4x4 cells, we have 3x3 blocks.
+    for (int by = 0; by < cellsY - 1; by++) {
+        for (int bx = 0; bx < cellsX - 1; bx++) {
+
+            vector<float> blockVec;
+            float sumSq = 0.0f;
+
+            // Iterate over 2x2 cells in this block
+            for (int cy = by; cy < by + 2; cy++) {
+                for (int cx = bx; cx < bx + 2; cx++) {
+                    for (int b = 0; b < nBins; b++) {
+                        float val = cellHistograms[cy][cx][b];
+                        blockVec.push_back(val);
+                        sumSq += val * val;
+                    }
+                }
+            }
+
+            // Normalize
+            float scale = 1.0f / sqrt(sumSq + 1e-5f); // Epsilon for stability
+            for (float& val : blockVec) {
+                descriptors.push_back(val * scale);
+            }
+        }
+    }
+}
+// --- MANUAL HOG IMPLEMENTATION END ---
 
 void extractContourFeatures(const vector<Point>& contour, FruitFeatures& features) {
     features.area = contourArea(contour);
@@ -166,8 +267,15 @@ FruitFeatures extractFeatures(Mat img, int label = -1) {
     extractEdgeOrientationHistogram(edges, features);
     extractHoughFeatures(edges, features);
 
+    // NEW: Extract Manual HOG Features from original image
+    extractLiteralHOGFeatures(img, features.hogDescriptors);
+
     return features;
 }
+
+// ==========================================
+// 3. CLASSIFICATION SYSTEM
+// ==========================================
 
 class KNNClassifier {
 private:
@@ -195,6 +303,19 @@ private:
         dist += 0.5 * pow((f1.numLines - f2.numLines) / 10.0, 2);
         dist += 0.5 * pow((f1.avgLineLength - f2.avgLineLength) / 100.0, 2);
         dist += 0.5 * pow((f1.avgLineAngle - f2.avgLineAngle) / 90.0, 2);
+
+        // NEW: Add HOG Distance
+        // Ensure both have valid HOG vectors of the same size
+        if (!f1.hogDescriptors.empty() && f1.hogDescriptors.size() == f2.hogDescriptors.size()) {
+            double hogDist = 0;
+            for (size_t i = 0; i < f1.hogDescriptors.size(); i++) {
+                hogDist += pow(f1.hogDescriptors[i] - f2.hogDescriptors[i], 2);
+            }
+            // Weighting HOG: 
+            // HOG vector is long (~300 features), so raw Euclidean distance can be large.
+            // We scale it down to balance with other shape features.
+            dist += 0.5 * hogDist;
+        }
 
         return sqrt(dist);
     }
@@ -253,6 +374,10 @@ public:
         return (double)correct / testSet.size();
     }
 };
+
+// ==========================================
+// 4. DATA LOADING & MAIN UTILS
+// ==========================================
 
 map<string, int> fruitLabelMap = {
     {"apple", 0},
@@ -346,7 +471,9 @@ void splitTrainTest(const vector<FruitFeatures>& allData,
     shuffle(testSet.begin(), testSet.end(), g);
 }
 
-// ============= INTERACTIVE DRAWING INTERFACE =============
+// ==========================================
+// 5. INTERACTIVE DRAWING APP
+// ==========================================
 
 class DrawingApp {
 private:
@@ -475,10 +602,14 @@ private:
     }
 };
 
+// ==========================================
+// 6. MAIN EXECUTION
+// ==========================================
+
 int main() {
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_WARNING);
 
-    cout << "===== Fruit Sketch Recognition System =====" << endl;
+    cout << "===== Fruit Sketch Recognition System (w/ Manual HOG) =====" << endl;
 
     // Load all images (limit to 1000 per class for faster testing)
     vector<FruitFeatures> allFeatures = loadImagesFromDirectory("fruit_images", 1000);
